@@ -22,6 +22,25 @@ def jacobian(q):
 	global robot_def
 	return robotjacobian(robot_def,q)
 
+def jog_joint(q,max_v,vd=[]):
+	global vel_ctrl
+	#enable velocity mode
+	vel_ctrl.enable_velocity_mode()
+
+	diff=q-vel_ctrl.joint_position()
+	time_temp=np.linalg.norm(diff)/max_v
+
+	qdot_temp=np.clip((1.15*diff)/time_temp,-max_v,max_v)
+	while np.linalg.norm(q-vel_ctrl.joint_position())>0.01:
+		
+		diff=q-vel_ctrl.joint_position()
+		qdot=np.where(np.abs(diff) > 0.05, qdot_temp, diff)
+
+		vel_ctrl.set_velocity_command(qdot)
+	vel_ctrl.set_velocity_command(np.zeros((6,)))
+	vel_ctrl.disable_velocity_mode() 
+
+
 def moveL(pd,Rd):
 	global vel_ctrl, state_w
 	q_cur=state_w.InValue.joint_position
@@ -111,9 +130,9 @@ def main():
 	cmd_w = robot_sub.SubscribeWire("position_command")
 	RobotJointCommand = RRN.GetStructureType("com.robotraconteur.robotics.robot.RobotJointCommand",robot)
 	vel_ctrl = EmulatedVelocityControl(robot,state_w, cmd_w)
-	#enable velocity mode
-	vel_ctrl.enable_velocity_mode()
-	
+	###enable velocity mode
+	# vel_ctrl.enable_velocity_mode()
+
 
 	print(robot.robot_info.device_info.device.name+" Connected")
 
@@ -127,6 +146,8 @@ def main():
 	pose=state_w.InValue.kin_chain_tcp
 	print(list(pose['position'][0]),q2R(list(pose['orientation'][0])))
 	print(fwd(q))
+
+	jog_joint(np.ones(6),0.1)
 
 if __name__ == "__main__":
 	main()
