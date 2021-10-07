@@ -7,6 +7,8 @@ from general_robotics_toolbox import *
 sys.path.append('toolbox')
 from vel_emulate_sub import EmulatedVelocityControl
 from qpsolvers import solve_qp
+import rpi_ati_net_ft
+from gen_damper_control import *
 
 def normalize_dq(q):
 	q[:-1]=q[:-1]/(np.linalg.norm(q[:-1])) 
@@ -27,6 +29,13 @@ def jacobian(q):
 	global robot_def
 	return robotjacobian(robot_def,q)
 
+def Rx(theta):
+	return np.array(([[1,0,0],[0,np.cos(theta),-np.sin(theta)],[0,np.sin(theta),np.cos(theta)]]))
+
+def Rz(theta):
+	return np.array(([[np.cos(theta),-np.sin(theta),0],[np.sin(theta),np.cos(theta),0],[0,0,1]]))
+
+
 def jog_joint(q,max_v,vd=[]):
 	global vel_ctrl
 	#enable velocity mode
@@ -46,53 +55,53 @@ def jog_joint(q,max_v,vd=[]):
 	vel_ctrl.disable_velocity_mode() 
 
 
-def moveL(pd,Rd):
-	global vel_ctrl, state_w
-	q_cur=state_w.InValue.joint_position
-	pose=state_w.InValue.kin_chain_tcp
-	R_cur = q2R(list(pose['orientation'][0]))
-	p_cur = list(pose['position'][0])
+# def moveL(pd,Rd):
+# 	global vel_ctrl, state_w
+# 	q_cur=state_w.InValue.joint_position
+# 	pose=state_w.InValue.kin_chain_tcp
+# 	R_cur = q2R(list(pose['orientation'][0]))
+# 	p_cur = list(pose['position'][0])
 
-	R_temp=np.dot(R_cur.T,Rd)
-	k,theta=R2rot(R_temp)
+# 	R_temp=np.dot(R_cur.T,Rd)
+# 	k,theta=R2rot(R_temp)
 
-	p_interp=[]
-	R_interp=[]
-	for i in range(10000):
-		###interpolate orientation first
-		p_interp.append(p_cur+(pd-p_cur)*i/10000.)
-		###interpolate orientation second
-		angle=theta*i/10000.
-		R=rot(k,angle)
-		R_interp.append(np.dot(R_cur,R))
+# 	p_interp=[]
+# 	R_interp=[]
+# 	for i in range(10000):
+# 		###interpolate orientation first
+# 		p_interp.append(p_cur+(pd-p_cur)*i/10000.)
+# 		###interpolate orientation second
+# 		angle=theta*i/10000.
+# 		R=rot(k,angle)
+# 		R_interp.append(np.dot(R_cur,R))
 
-	###issuing position command
-	command_seqno = 1
-	for i in range(len(p_interp)):
-		###TODO:
-		q_all=inv(p_interp[i],R_interp[i])
-		#find closest joint config
-		if i==0:
-			temp_q=q_all-q_cur
-			order=np.argsort(np.linalg.norm(temp_q,axis=1))
-			q_next=q_all[order[0]]
-		else:
-			temp_q=q_all-q_next
-			order=np.argsort(np.linalg.norm(temp_q,axis=1))
-			q_next=q_all[order[0]]
-
-
-		joint_cmd = RobotJointCommand()
-		joint_cmd.seqno = command_seqno
-		joint_cmd.state_seqno = state_w.InValue.seqno
-		cmd = q_next
-		joint_cmd.command = cmd
-		cmd_w.OutValue = joint_cmd
-		command_seqno += 1
+# 	###issuing position command
+# 	command_seqno = 1
+# 	for i in range(len(p_interp)):
+# 		###TODO:
+# 		q_all=inv(p_interp[i],R_interp[i])
+# 		#find closest joint config
+# 		if i==0:
+# 			temp_q=q_all-q_cur
+# 			order=np.argsort(np.linalg.norm(temp_q,axis=1))
+# 			q_next=q_all[order[0]]
+# 		else:
+# 			temp_q=q_all-q_next
+# 			order=np.argsort(np.linalg.norm(temp_q,axis=1))
+# 			q_next=q_all[order[0]]
 
 
+# 		joint_cmd = RobotJointCommand()
+# 		joint_cmd.seqno = command_seqno
+# 		joint_cmd.state_seqno = state_w.InValue.seqno
+# 		cmd = q_next
+# 		joint_cmd.command = cmd
+# 		cmd_w.OutValue = joint_cmd
+# 		command_seqno += 1
 
-def move(vd, Rd):
+
+
+def move(vd, ER):
 	global vel_ctrl, state_w
 	try:
 		w=1.
@@ -107,16 +116,17 @@ def move(vd, Rd):
 
 		H=(H+np.transpose(H))/2
 
-		R_cur = fwd(q_cur).R
-		ER=np.dot(R_cur,np.transpose(Rd))
+
 		k,theta = R2rot(ER)
 		k=np.array(k)
 		s=np.sin(theta/2)*k         #eR2
 		wd=-np.dot(KR,s)  
 		f=-np.dot(np.transpose(Jp),vd)-w*np.dot(np.transpose(JR),wd)
-		# lb=-0.2*np.ones(6)
-		# ub=0.2*np.ones(6)
-		qdot=0.1*normalize_dq(solve_qp(H, f))
+
+		qdot=solve_qp(H, f)
+		if np.max(np.abs(qdot))>0.4:
+			qdot=np.zeros(6)
+			print('too fast')
 		vel_ctrl.set_velocity_command(qdot)
 
 	except:
@@ -125,7 +135,7 @@ def move(vd, Rd):
 
 
 def main():
-	global robot_def, vel_ctrl
+	global robot_def, vel_ctrl, joint_bias
 	####################Start Service and robot setup
 
 	robot_sub=RRN.SubscribeService('rr+tcp://pi_fuse:58651?service=robot')
@@ -151,19 +161,62 @@ def main():
 	H=np.transpose(np.array(robot.robot_info.chains[0].H.tolist()))
 	robot_def=Robot(H,np.transpose(P),np.zeros(num_joints))
 
+	Rd=np.array([[0,0,1],[0,1,0],[-1,0,0]])
 
-	q=state_w.InValue.joint_position
-	pose=state_w.InValue.kin_chain_tcp
-	R_cur=q2R(list(pose['orientation'][0]))
-	print(list(pose['position'][0]),q2R(list(pose['orientation'][0])))
-	print(fwd(q))
+	q=vel_ctrl.joint_position()
+	pose=fwd(q)
+	R_cur=pose.R
+	print(R_cur)
 
+	netft=rpi_ati_net_ft.NET_FT('192.168.50.65')
+	netft.set_tare_from_ft()
+	netft.start_streaming()
 	now=time.time()
+
+
 	vel_ctrl.enable_velocity_mode()
-	while time.time()- now<2:
-		vd=[0,0,0.1]
-		move(vd,R_cur)
-	vel_ctrl.disable_velocity_mode()
+	while True:
+		try:
+			res, ft, status = netft.try_read_ft_streaming(.1)
+			torque_y=-np.sin(np.pi/4)*ft[0]+np.cos(np.pi/4)*ft[1]
+			force_z=-np.sin(np.pi/4)*ft[3]-np.cos(np.pi/4)*ft[4]
+			force_x=ft[-1]
+
+			if np.abs(force_x)<0.15:
+				force_x=0.
+			if np.abs(force_z)<0.15:
+				force_z=0.
+
+			v_y_EE, v_z_EE, omega_EE = gen_damper_control(np.pi/2, force_z, force_x, 0., b_x=50., b_z=50., b_omega=50., d_FT_COC=0.233-0.033, d_EE_COC=0.233, F_x_des=0.)
+			print('v_y: ', v_y_EE)
+			print('v_z: ', v_z_EE)
+			print('omega: ',omega_EE)
+			print('      ')
+
+			vd=np.array([0,v_y_EE,v_z_EE])
+			vd=np.clip(vd, -0.2, 0.2)
+			ER=Rx(-omega_EE)
+			move(vd,np.eye(3))
+			time.sleep(0.001)
+		except:
+			vel_ctrl.disable_velocity_mode()
+			break
+
+	# pose_p=np.array([-0.00772909, 0.66492853, 0.5176524])
+	# pose_R=np.array([[np.pi/2,0,0,0,0,0],R=np.array([[ 0,0,1],
+	# 		 [0,1,0],
+	# 		 [-1,0,0]])
+	# pose_q=[ 1.58376339,  0.5813696,  -0.09457617, -0.01236589,  1.0756525,   1.59067882]
+	# jog_joint(pose_q)
+
+
+	# now=time.time()
+	# vel_ctrl.enable_velocity_mode()
+	# while time.time()- now<5:
+	# 	vd=[0,-0.01,0]
+	# 	move(vd,np.eye(3))
+	# vel_ctrl.disable_velocity_mode()
+
 
 if __name__ == "__main__":
 	main()
