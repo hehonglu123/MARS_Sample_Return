@@ -9,6 +9,7 @@ from vel_emulate_sub import EmulatedVelocityControl
 from qpsolvers import solve_qp
 import rpi_ati_net_ft
 from gen_damper_control import *
+import matplotlib.pyplot as plt
 
 def normalize_dq(q):
 	q[:-1]=q[:-1]/(np.linalg.norm(q[:-1])) 
@@ -102,7 +103,7 @@ def jog_joint(q,max_v,vd=[]):
 
 
 def move(vd, ER):
-	global vel_ctrl, state_w
+	global vel_ctrl, state_w, stop
 	try:
 		w=1.
 		Kq=.01*np.eye(6)    #small value to make sure positive definite
@@ -124,8 +125,9 @@ def move(vd, ER):
 		f=-np.dot(np.transpose(Jp),vd)-w*np.dot(np.transpose(JR),wd)
 
 		qdot=solve_qp(H, f)
-		if np.max(np.abs(qdot))>0.8:
+		if np.max(np.abs(qdot))>0.5:
 			qdot=np.zeros(6)
+			stop=True
 			print('too fast')
 		vel_ctrl.set_velocity_command(qdot)
 
@@ -135,9 +137,11 @@ def move(vd, ER):
 
 
 def comp_control(F_x_des=1.):
-	global robot_def, vel_ctrl, netft, state_w
+	global robot_def, vel_ctrl, netft, state_w, force_reading
 
-	z_init=0.20318366
+	
+
+	z_init=0.19499046
 	d_EE_TCP=0.15
 	d_EE_FT=0.033
 
@@ -147,6 +151,9 @@ def comp_control(F_x_des=1.):
 	torque_y=-np.sin(np.pi/4)*ft[0]+np.cos(np.pi/4)*ft[1]
 	force_z=-np.sin(np.pi/4)*ft[3]-np.cos(np.pi/4)*ft[4]
 	force_x=ft[-1]
+
+	force_reading.append([time.time(),force_x,force_z,torque_y])
+
 
 	# if np.abs(force_x)<0.15:
 	# 	force_x=0.
@@ -168,25 +175,24 @@ def comp_control(F_x_des=1.):
 
 	d_FT_COC=d_EE_COC-d_EE_FT
 	print('d_FT_COC: ',d_FT_COC)
-	
 
+	damping_coeff=max(np.linalg.norm(np.array([force_z,force_x,torque_y]))/2.,1)
 
-	v_y_EE, v_z_EE, omega_EE = gen_damper_control(theta, force_z, force_x, torque_y, b_x=5000., b_z=1000., b_omega=100., d_FT_COC=d_FT_COC, d_EE_COC=d_EE_COC, F_x_des=F_x_des)
+	v_y_EE, v_z_EE, omega_EE = gen_damper_control(theta, force_z, force_x, torque_y, b_x=damping_coeff*5000., b_z=damping_coeff*1000., b_omega=damping_coeff*100., d_FT_COC=d_FT_COC, d_EE_COC=d_EE_COC, F_x_des=F_x_des)
 	print('v_y: ', v_y_EE)
 	print('v_z: ', v_z_EE)
-	print('omega: ',omega_EE)
+	print('force_x: ',force_x)
 	print('      ')
 
 	vd=np.array([0,v_y_EE,v_z_EE])
-	vd=np.clip(vd, -0.1, 0.1)
+	vd=np.clip(vd, -0.02, 0.02)
 	ER=Rx(-omega_EE)
 	move(vd,ER)
-	time.sleep(0.001)
-
+	
 
 
 def main():
-	global robot_def, vel_ctrl, netft, state_w
+	global robot_def, vel_ctrl, netft, state_w, force_reading, stop
 	####################Start Service and robot setup
 
 	robot_sub=RRN.SubscribeService('rr+tcp://pi_fuse:58651?service=robot')
@@ -226,14 +232,58 @@ def main():
 
 	vel_ctrl.enable_velocity_mode()
 	netft.set_tare_from_ft()
+	Fd=100.
+	force_reading=[]
+	stop=False
+	now=time.time()
+
+	max_idx=100
+	plt.ion()
+	fig = plt.figure()
+	ax = fig.add_subplot(111)
+
+
+	line_fz, = ax.plot([1,2], [1,2], 'b-')
+	line_fx, = ax.plot([1,2],[1,2], 'r-')
+
+	last_time=time.time()
 	while True:
 		try:
-			Fd=5.
+			# temp_time=time.time()
 			comp_control(Fd)
+
+			if time.time()-last_time>0.01:
+				force_reading_nd=np.array(force_reading)
+				force_reading_nd[:,0]-=now
+				line_fz.set_xdata(force_reading_nd[max(0,len(force_reading)-max_idx):,0])
+				line_fz.set_ydata(force_reading_nd[max(0,len(force_reading)-max_idx):,1])
+				line_fx.set_xdata(force_reading_nd[max(0,len(force_reading)-max_idx):,0])
+				line_fx.set_ydata(force_reading_nd[max(0,len(force_reading)-max_idx):,2])
+				ax.relim()
+				ax.autoscale_view()
+				fig.canvas.draw()
+				fig.canvas.flush_events()
+
+				last_time=time.time()
+
+			if stop:
+				break
+
+			time.sleep(0.001)
+			# print(1/(time.time()-temp_time))
 		except:
 			vel_ctrl.disable_velocity_mode()
 			traceback.print_exc()
 			break
+
+	
+	# plt.plot(force_reading_nd[:,0],force_reading_nd[:,3])
+	plt.xlabel('time (s)')
+	plt.ylabel('force (N)')
+	plt.legend(['force z','force_y'])
+	plt.show()
+
+	np.savetxt("force_data.csv", force_reading, delimiter=",")
 
 	# pose_p=np.array([-0.00772909, 0.66492853, 0.5176524])
 	# pose_R=np.array([[np.pi/2,0,0,0,0,0],R=np.array([[ 0,0,1],
