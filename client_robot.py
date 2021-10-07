@@ -6,6 +6,11 @@ from importlib import import_module
 from general_robotics_toolbox import *
 sys.path.append('toolbox')
 from vel_emulate_sub import EmulatedVelocityControl
+from qpsolvers import solve_qp
+
+def normalize_dq(q):
+	q[:-1]=q[:-1]/(np.linalg.norm(q[:-1])) 
+	return q  
 
 def fwd(q):	
 	global robot_def
@@ -72,19 +77,18 @@ def moveL(pd,Rd):
 			order=np.argsort(np.linalg.norm(temp_q,axis=1))
 			q_next=q_all[order[0]]
 		else:
-			try:
-				temp_q=q_all-q_next
-				order=np.argsort(np.linalg.norm(temp_q,axis=1))
-				q_next=q_all[order[0]]
+			temp_q=q_all-q_next
+			order=np.argsort(np.linalg.norm(temp_q,axis=1))
+			q_next=q_all[order[0]]
 
 
 		joint_cmd = RobotJointCommand()
-	    joint_cmd.seqno = command_seqno
-	    joint_cmd.state_seqno = state_w.InValue.seqno
-	    cmd = q_next
-	    joint_cmd.command = cmd
-	    cmd_w.OutValue = joint_cmd
-	    command_seqno += 1
+		joint_cmd.seqno = command_seqno
+		joint_cmd.state_seqno = state_w.InValue.seqno
+		cmd = q_next
+		joint_cmd.command = cmd
+		cmd_w.OutValue = joint_cmd
+		command_seqno += 1
 
 
 
@@ -92,7 +96,7 @@ def move(vd, Rd):
 	global vel_ctrl, state_w
 	try:
 		w=1.
-		Kq=.01*np.eye(n)    #small value to make sure positive definite
+		Kq=.01*np.eye(6)    #small value to make sure positive definite
 		KR=np.eye(3)        #gains for position and orientation error
 
 		q_cur=vel_ctrl.joint_position()
@@ -103,7 +107,7 @@ def move(vd, Rd):
 
 		H=(H+np.transpose(H))/2
 
-		R_cur = fwdkin(q_cur).R
+		R_cur = fwd(q_cur).R
 		ER=np.dot(R_cur,np.transpose(Rd))
 		k,theta = R2rot(ER)
 		k=np.array(k)
@@ -112,7 +116,7 @@ def move(vd, Rd):
 		f=-np.dot(np.transpose(Jp),vd)-w*np.dot(np.transpose(JR),wd)
 		# lb=-0.2*np.ones(6)
 		# ub=0.2*np.ones(6)
-		qdot=0.5*normalize_dq(solve_qp(H, f))
+		qdot=0.1*normalize_dq(solve_qp(H, f))
 		vel_ctrl.set_velocity_command(qdot)
 
 	except:
@@ -124,14 +128,20 @@ def main():
 	global robot_def, vel_ctrl
 	####################Start Service and robot setup
 
-	robot_sub=RRN.SubscribeService('rr+tcp://pathpilot:11111?service=tormach_robot')
+	robot_sub=RRN.SubscribeService('rr+tcp://pi_fuse:58651?service=robot')
 	robot=robot_sub.GetDefaultClientWait(1)
 	state_w = robot_sub.SubscribeWire("robot_state")
 	cmd_w = robot_sub.SubscribeWire("position_command")
 	RobotJointCommand = RRN.GetStructureType("com.robotraconteur.robotics.robot.RobotJointCommand",robot)
 	vel_ctrl = EmulatedVelocityControl(robot,state_w, cmd_w)
-	###enable velocity mode
-	# vel_ctrl.enable_velocity_mode()
+	
+	robot_const = RRN.GetConstants("com.robotraconteur.robotics.robot", robot)
+	state_flags_enum = robot_const['RobotStateFlags']
+	halt_mode = robot_const["RobotCommandMode"]["halt"]
+	position_mode = robot_const["RobotCommandMode"]["position_command"]
+	robot.command_mode = halt_mode
+	time.sleep(0.1)
+	robot.command_mode = position_mode
 
 
 	print(robot.robot_info.device_info.device.name+" Connected")
@@ -144,10 +154,16 @@ def main():
 
 	q=state_w.InValue.joint_position
 	pose=state_w.InValue.kin_chain_tcp
+	R_cur=q2R(list(pose['orientation'][0]))
 	print(list(pose['position'][0]),q2R(list(pose['orientation'][0])))
 	print(fwd(q))
 
-	jog_joint(np.ones(6),0.1)
+	now=time.time()
+	vel_ctrl.enable_velocity_mode()
+	while time.time()- now<2:
+		vd=[0,0,0.1]
+		move(vd,R_cur)
+	vel_ctrl.disable_velocity_mode()
 
 if __name__ == "__main__":
 	main()
