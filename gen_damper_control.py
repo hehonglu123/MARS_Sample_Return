@@ -30,7 +30,7 @@ def  gen_damper_control(theta, F_z, F_x, tau, b_z, b_x, b_omega, d_FT_COC, d_EE_
 
     # Compute velocities of COC frame in COC frame
     v_z_COC = F_z_COC / b_z
-    v_x_COC = (F_x_COC - F_x_des) / b_x
+    v_x_COC = (F_x_COC + F_x_des) / b_x
     omega_COC = tau_COC / b_omega
 
     # Convert to velocities of the end effector in the world frame
