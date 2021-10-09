@@ -27,7 +27,7 @@ We're using ABB1200 with an ATI mini45 force sensor mounted between the robot en
 </p>
 The robot motion is limited to its Y-Z plane, including translation in Y and Z axes and rotation around X axis. 
 Robot end effector frame, sensor frame and TCP frame are set up in the same orientation.
-
+The compliance control loop outputs Cartesian velocity, and passed into QP controller to execute the motion.
 
 
 
