@@ -13,8 +13,8 @@ import matplotlib.pyplot as plt
 
 def wrench_wire_cb(w,value,time):
 	global torque, force
-	torque=np.array(value['torque']['x'],value['torque']['y'],value['torque']['z'])
-	force=np.array(value['force']['x'],value['force']['y'],value['force']['z'])
+	torque=np.array([value['torque']['x'],value['torque']['y'],value['torque']['z']])
+	force=np.array([value['force']['x'],value['force']['y'],value['force']['z']])
 
 def move(vd, ER):
 	global vel_ctrl, state_w, stop, robot_toolbox
@@ -40,7 +40,7 @@ def move(vd, ER):
 		###Don't put bound here, will affect cartesian motion outcome
 		qdot=solve_qp(H, f)
 		###For safty, make sure robot not moving too fast
-		if np.max(np.abs(qdot))>0.5:
+		if np.max(np.abs(qdot[:-2]))>0.5:
 			qdot=np.zeros(6)
 			stop=True
 			print('too fast')
@@ -52,24 +52,26 @@ def move(vd, ER):
 
 def main():
 	global vel_ctrl, torque, force, state_w, stop, robot_toolbox
+	torque=np.zeros(3)
+	force=np.zeros(3)
 
-	with open('config/abb1200.yml') as robot_file:
+	with open('config/tormach_za06_robot_default_config.yml') as robot_file:
 		with open('config/tool_pose.yaml') as tool_file:
 			robot_toolbox=yml2robdef(robot_file,tool_file)
 
 	################################Connect to FT Sensor###################################
 	url='rr+tcp://localhost:59823?service=ati_sensor'
-    if (len(sys.argv)>=2):
-        url=sys.argv[1]
+	if (len(sys.argv)>=2):
+		url=sys.argv[1]
 
-    #Connect to the service
-    cli = RRN.ConnectService(url)
+	#Connect to the service
+	cli = RRN.ConnectService(url)
 
-    #Connect a wire connection
-    wrench_wire = cli.wrench_sensor_value.Connect()
+	#Connect a wire connection
+	wrench_wire = cli.wrench_sensor_value.Connect()
 
-    #Add callback for when the wire value change
-    wrench_wire.WireValueChanged += wrench_wire_cb
+	#Add callback for when the wire value change
+	wrench_wire.WireValueChanged += wrench_wire_cb
 
 	##########################Connect Robot Service###########################################
 
@@ -99,12 +101,18 @@ def main():
 			#convert tool frame to base frame
 			q_cur=vel_ctrl.joint_position()
 			R=robot_toolbox.fwd(q_cur).R
-			torque_bf=np.dot(R,torque)
-			force_bf=np.dot(R,force)
+			if np.linalg.norm(torque)>2 or np.linalg.norm(force)>2:
+				torque_bf=np.dot(R,torque)
+				force_bf=np.dot(R,force)
+			else:
+				torque_bf=np.zeros((3,1))
+				force_bf=np.zeros((3,1))
 			#command motion based on reading
-			K_force=0.001
-			K_torque=0.1
-			move(K_force*np.array([force_bf[0],0,force_bf[-1]]),Rz(K_torque*torque_bf[1]))
+			K_force=10
+			K_torque=10
+
+
+			move(K_force*np.array([force_bf[0][0],0,force_bf[-1][0]]),Ry(-K_torque*torque_bf[1][0]))
 		except:
 			traceback.print_exc()
 			break
